@@ -220,6 +220,7 @@ public class ReportExecutionJob implements Job {
     }
 
     public void execute(JobExecutionContext context) throws JobExecutionException {
+        int[] outOfMemoryBuffer = new int[20000];  // Reserve enough memory to send a message.
         SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
         SecurityContextProvider securityContextProvider = null;
         try {
@@ -237,19 +238,39 @@ public class ReportExecutionJob implements Job {
             securityContextProvider = getSecurityContextProvider();
             securityContextProvider.setAuthenticatedUser(this.username);
             createAuditEvent();
-            if (log.isDebugEnabled()) {
-                log.debug("*** about to execute job ***\n" + logId);
-            }
+
+            log.error("*** ReportExecutionJob.execute: about to execute job ***\n" + logId);
             executeAndSendReport();
         } catch (JobExecutionException e) {
-            addExceptionToAuditEvent(e);
+            if (e.getCause() instanceof OutOfMemoryError) {
+        		outOfMemoryBuffer = null;
+        		java.lang.System.gc();
+            }
+            
+            log.error("*** ReportExecutionJob.execute caused a JobExcecutionException: " + e.getMessage());
+            addExceptionToAuditEvent(e);            
+            mailError(e.getCause());
+            
             throw e;
         } catch (SchedulerException e) {
+        	log.error("*** ReportExecutionJob.execute caused a SchedulerException: " + e.getMessage());
+        	
             addExceptionToAuditEvent(e);
+            mailError(e.getCause());
+            
             throw new JobExecutionException(e);
+        } catch (OutOfMemoryError e) {
+    		outOfMemoryBuffer = null;
+    		java.lang.System.gc();
+
+    		log.error("*** ReportExcecutionJob.execute caused an OutOfMemoryError: " + e.getMessage());
+    		
+            addExceptionToAuditEvent(e);
+            mailError(e);
         } catch (RuntimeException e) {
             log.error("*** ReportExecutionJob.execute EXCEPTION *** for \n" + logId, e);
         } finally {
+        	log.error("*** In the ReportExecutionJob.execute finally code.");
             try {
                 closeAuditEvent();
                 clear();
@@ -260,6 +281,26 @@ public class ReportExecutionJob implements Job {
             }
         }
     }
+
+	/**
+	 * @param e
+	 * @throws JobExecutionException
+	 */
+	private void mailError(Throwable e) throws JobExecutionException {
+		try {
+		    sendAlertMail();
+		} catch (JobExecutionException e2) {
+		    log.error("*** ReportExecutionJob.execute EXCEPTION: Out of memory AND buffer (probably) not large enough to send message. logId = " + logId, e);
+		    throw e2;
+		}
+
+		if (! (e instanceof JobExecutionException)) {
+			JobExecutionException e2 = new JobExecutionException(e);
+			throw e2;
+		} else {
+			throw (JobExecutionException) e;
+		}
+	}
 
     protected void initJobExecution() {
         updateExecutionContextDetails();
